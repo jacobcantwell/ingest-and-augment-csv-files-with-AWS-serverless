@@ -1,0 +1,158 @@
+{
+  "Comment": "Using Map state in Distributed mode",
+  "StartAt": "Load subscription data",
+  "States": {
+    "Load subscription data": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:lambda:invoke",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "arn:aws:lambda:ap-southeast-2:0000000000:function:get-subscription-data-v1:$LATEST"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Process input csv file",
+      "ResultPath": "$.SourceCsv"
+    },
+    "Process input csv file": {
+      "Type": "Map",
+      "MaxConcurrency": 100,
+      "ItemReader": {
+        "ReaderConfig": {
+          "InputType": "CSV",
+          "CSVHeaderLocation": "FIRST_ROW"
+        },
+        "Resource": "arn:aws:states:::s3:getObject",
+        "Parameters": {
+          "Bucket.$": "$.inputBucketName",
+          "Key.$": "$.inputObjectKey"
+        }
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "EXPRESS"
+        },
+        "StartAt": "Process CSV data",
+        "States": {
+          "Process CSV data": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "OutputPath": "$.Payload",
+            "Parameters": {
+              "Payload.$": "$",
+              "FunctionName": "arn:aws:lambda:ap-southeast-2:0000000000:function:csv-file-input-processing-v1:$LATEST"
+            },
+            "End": true
+          }
+        }
+      },
+      "Label": "Processinputcsvfile",
+      "ItemSelector": {
+        "index.$": "$$.Map.Item.Index",
+        "value.$": "$$.Map.Item.Value"
+      },
+      "ItemBatcher": {
+        "MaxItemsPerBatch": 100
+      },
+      "ResultWriter": {
+        "Resource": "arn:aws:states:::s3:putObject",
+        "Parameters": {
+          "Bucket": "csv-file-processing-0000000000",
+          "Prefix": "csv-processed-output/"
+        }
+      },
+      "Next": "Get Manifest Results File from Amazon S3"
+    },
+    "Get Manifest Results File from Amazon S3": {
+      "Type": "Task",
+      "Parameters": {
+        "Bucket.$": "$.ResultWriterDetails.Bucket",
+        "Key.$": "$.ResultWriterDetails.Key"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Next": "Test if Processing was successful",
+      "ResultSelector": {
+        "Body.$": "States.StringToJson($.Body)"
+      },
+      "OutputPath": "$.Body"
+    },
+    "Test if Processing was successful": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Or": [
+            {
+              "Variable": "$.ResultFiles.FAILED",
+              "StringMatches": "[]"
+            },
+            {
+              "Variable": "$.ResultFiles.PENDING",
+              "StringMatches": "[]"
+            }
+          ],
+          "Next": "Fail",
+          "Comment": "Has any Failed or Pending Records"
+        },
+        {
+          "Not": {
+            "Variable": "$.ResultFiles.SUCCEEDED",
+            "StringMatches": "[]"
+          },
+          "Next": "Get Success Result Files",
+          "Comment": "Has Succeeded Records"
+        }
+      ],
+      "Default": "Fail",
+      "Comment": "Test if Processing was successful"
+    },
+    "Get Success Result Files": {
+      "Type": "Pass",
+      "Next": "Create CSV from Success Result Files",
+      "Parameters": {
+        "Keys.$": "$.ResultFiles.SUCCEEDED",
+        "Bucket.$": "$.DestinationBucket"
+      }
+    },
+    "Create CSV from Success Result Files": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "arn:aws:lambda:ap-southeast-2:0000000000:function:create-csv-from-processed-json-files-v1:$LATEST"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Success"
+    },
+    "Fail": {
+      "Type": "Fail"
+    },
+    "Success": {
+      "Type": "Succeed"
+    }
+  }
+}
